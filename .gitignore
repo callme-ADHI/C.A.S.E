@@ -1,0 +1,19 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment Variables (Sensitive data)
+.env
+.env.local
+.env.*.local
+
+# Databases and OSINT data
+data/cases.db
+outputs/

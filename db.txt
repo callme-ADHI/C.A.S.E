@@ -1,0 +1,50 @@
+# C.A.S.E. Database Schema (cases.db)
+Location: data/cases.db
+
+This database stores all investigation records and extracted Indicators of Compromise (IOCs).
+
+## Table 1: cases
+Stores the core details of each generated case.
+
+| Column           | Type     | Description |
+|-----------------|----------|-------------|
+| id              | INTEGER  | Primary Key (Auto-increment) |
+| case_number     | TEXT     | Unique case ID (Format: KL-CYB-YYYY-NNNN) |
+| crime_code      | TEXT     | I4C Crime Code (e.g., C001, C002) |
+| crime_name      | TEXT     | Human-readable name of the crime |
+| officer_name    | TEXT     | Name of the officer who filed the case |
+| complainant_name| TEXT     | Name of the victim or organization |
+| date_filed      | TEXT     | Date the case was created (YYYY-MM-DD) |
+| status          | TEXT     | Current status (Default: 'open') |
+| raw_inputs      | TEXT     | JSON string containing all answers from the questionnaire |
+| flags           | TEXT     | JSON string of triggered legal flags (PMLA, POCSO, Helpline) |
+| threat_score    | INTEGER  | Overall risk score (Default: 0) |
+| created_at      | DATETIME | Timestamp of creation |
+
+---
+
+## Table 2: iocs
+Stores the Indicators of Compromise automatically extracted from questionnaire answers. Linked to the `cases` table.
+
+| Column          | Type    | Description |
+|-----------------|---------|-------------|
+| id              | INTEGER | Primary Key (Auto-increment) |
+| case_id         | INTEGER | Foreign Key linking to `cases(id)` |
+| ioc_type        | TEXT    | Type of IOC (phone, email, url, ip, upi_id, wallet, hash) |
+| ioc_value       | TEXT    | The actual data (e.g., 9876543210, fraud@gmail.com) |
+| is_malicious    | INTEGER | Boolean flag (0 = No, 1 = Yes) — Set by Day 2 OSINT |
+| source          | TEXT    | Where it came from (Default: 'questionnaire') |
+
+---
+
+## Table 3: suspects
+Stores information about identified suspects. Linked to the `cases` table.
+
+| Column          | Type    | Description |
+|-----------------|---------|-------------|
+| id              | INTEGER | Primary Key (Auto-increment) |
+| case_id         | INTEGER | Foreign Key linking to `cases(id)` |
+| identifier      | TEXT    | Suspect's known identifier (name, phone, username) |
+| identifier_type | TEXT    | Type of identifier |
+| osint_data      | TEXT    | JSON string of data gathered during OSINT (Day 2) |
+| threat_score    | INTEGER | Individual suspect threat score (Default: 0) |
