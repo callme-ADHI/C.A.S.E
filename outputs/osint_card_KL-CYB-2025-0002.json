@@ -1,0 +1,149 @@
+{
+  "case_number": "KL-CYB-2025-0002",
+  "crime_name": "Phishing",
+  "generated_at": "2026-06-19T13:54:14.493632Z",
+  "entities": [
+    {
+      "identifier": "9876543210",
+      "identifier_type": "phone",
+      "osint_data": {
+        "ioc_type": "phone",
+        "ioc_value": "9876543210",
+        "results": [
+          {
+            "source": "phone_osint",
+            "phone": "9876543210",
+            "is_valid_format": true,
+            "linked_cases": [
+              {
+                "case_number": "KL-CYB-2025-0001",
+                "crime_name": "Identity Theft / Impersonation",
+                "date_filed": "2026-06-19"
+              }
+            ],
+            "is_repeat_offender_number": true,
+            "error": null
+          }
+        ],
+        "is_malicious": true
+      },
+      "threat_score": 95
+    },
+    {
+      "identifier": "fraud@tempmail.com",
+      "identifier_type": "email",
+      "osint_data": {
+        "ioc_type": "email",
+        "ioc_value": "fraud@tempmail.com",
+        "results": [
+          {
+            "source": "haveibeenpwned",
+            "error": "no_api_key",
+            "email": "fraud@tempmail.com",
+            "is_breached": null
+          },
+          {
+            "source": "domain_age_check",
+            "email": "fraud@tempmail.com",
+            "domain": "tempmail.com",
+            "domain_created_date": "2002-12-11T14:20:45Z",
+            "domain_age_days": 8591,
+            "is_newly_registered": false,
+            "is_disposable_domain": true,
+            "registrar": "Dynadot Inc",
+            "error": null
+          },
+          {
+            "source": "username_presence",
+            "username": "fraud",
+            "platforms_found": [
+              "Instagram",
+              "Twitter/X",
+              "GitHub"
+            ],
+            "platforms_checked": [
+              "Instagram",
+              "Twitter/X",
+              "Telegram",
+              "GitHub",
+              "Facebook"
+            ],
+            "results": {
+              "Instagram": "found",
+              "Twitter/X": "found",
+              "Telegram": "uncertain",
+              "GitHub": "found",
+              "Facebook": "uncertain"
+            },
+            "error": null
+          }
+        ],
+        "is_malicious": true
+      },
+      "threat_score": 85
+    },
+    {
+      "identifier": "scammer@ybl",
+      "identifier_type": "upi_id",
+      "osint_data": {
+        "ioc_type": "upi_id",
+        "ioc_value": "scammer@ybl",
+        "results": [
+          {
+            "source": "cross_case_linker",
+            "ioc_type": "upi_id",
+            "value": "scammer@ybl",
+            "linked_cases": [
+              {
+                "case_number": "KL-CYB-2025-0003",
+                "crime_name": "Financial Fraud",
+                "date_filed": "2026-06-19"
+              }
+            ],
+            "is_repeat_pattern": true,
+            "note": "Live NPCI trace requires LEA legal request — not available via public API",
+            "error": null
+          }
+        ],
+        "is_malicious": true
+      },
+      "threat_score": 95
+    },
+    {
+      "identifier": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+      "identifier_type": "wallet",
+      "osint_data": {
+        "ioc_type": "wallet",
+        "ioc_value": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+        "results": [
+          {
+            "source": "cross_case_linker",
+            "ioc_type": "wallet",
+            "value": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+            "linked_cases": [],
+            "is_repeat_pattern": false,
+            "note": "Live blockchain trace requires LEA legal request — not available via public API",
+            "error": null
+          }
+        ],
+        "is_malicious": false
+      },
+      "threat_score": 0
+    }
+  ],
+  "overall_threat_level": "HIGH",
+  "overall_threat_score": 95,
+  "repeat_offender_flags": [
+    "KL-CYB-2025-0003",
+    "KL-CYB-2025-0001"
+  ],
+  "recommended_next_steps": [
+    "Cross-reference suspect phone +919876543210 with linked cases: KL-CYB-2025-0001",
+    "Request subscriber details and Call Detail Records (CDR) for +919876543210 from telecom service providers",
+    "Submit legal notices to disposable mail provider (tempmail.com) to trace creator of fraud@tempmail.com",
+    "Preserve profiles and issue Section 91 BNSS notice to platforms for username 'fraud': Instagram, Twitter/X, GitHub",
+    "Cross-reference suspect UPI ID scammer@ybl with linked cases: KL-CYB-2025-0003",
+    "Issue Section 91 BNSS notice to the merchant/acquiring bank for UPI ID scammer@ybl to freeze account, reverse funds, and retrieve KYC details",
+    "Track blockchain transactions for wallet 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa using analytics and submit disclosure notices to cryptocurrency exchanges"
+  ]
+}

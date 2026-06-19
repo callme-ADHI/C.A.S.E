@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 C.A.S.E. — Cyber Attack Scene Examiner
-OSINT Runner — Day 2
+OSINT Runner — Day 3
 
 CLI tool that loads a case from the database, runs OSINT analysis
 on all extracted IOCs, and updates the database with results.
+Enriched with Day 3 modules for Identity, Breach, and Dark Web OSINT.
 
 Usage:
     python osint_runner.py <case_number>
@@ -14,13 +15,14 @@ Built for Kerala Police Cyber Cell.
 """
 
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime
 
 from colorama import init, Fore, Back, Style
 
-from config.config import DB_PATH, APP_NAME, VERSION, JURISDICTION
+from config.config import DB_PATH, APP_NAME, VERSION, JURISDICTION, OUTPUTS_DIR
 from modules.osint_engine import run_osint
 
 # ── Initialize colorama ───────────────────────────────────────────────────────
@@ -41,8 +43,8 @@ OSINT_BANNER = rf"""
    ╚═════╝   ╚═╝  ╚═╝  ╚══════╝  ╚══════╝
 {Style.RESET_ALL}
 {Fore.WHITE}  ╔══════════════════════════════════════════════════╗
-  ║  {Fore.CYAN}OSINT Engine{Fore.WHITE} — Day 2                            ║
-  ║  IP · URL · Domain · Hash Analysis              ║
+  ║  {Fore.CYAN}OSINT Engine{Fore.WHITE} — Day 3                            ║
+  ║  Identity, Breach & Dark Web Analysis            ║
   ║  {JURISDICTION:<44s}  ║
   ╚══════════════════════════════════════════════════╝{Style.RESET_ALL}
 """
@@ -122,19 +124,16 @@ def update_case_threat_score(case_number, score):
 def calculate_threat_score(osint_result):
     """
     Calculate a threat score (0–100) from OSINT results.
-
-    Uses the highest value between:
-      - AbuseIPDB abuse_score
-      - VirusTotal malicious_count × 10
     """
     scores = []
 
     for r in osint_result.get("results", []):
-        if "error" in r:
+        if not r or (r.get("error") is not None and r.get("error") != "no_api_key"):
             continue
 
         source = r.get("source", "")
 
+        # Day 2 Sources
         if source == "abuseipdb":
             scores.append(r.get("abuse_score", 0))
 
@@ -152,7 +151,246 @@ def calculate_threat_score(osint_result):
             else:
                 scores.append(r.get("verdict_score", 0))
 
+        # Day 3 Sources
+        elif source == "haveibeenpwned":
+            if r.get("is_breached", False):
+                scores.append(min(r.get("breach_count", 0) * 20, 60))
+
+        elif source == "domain_age_check":
+            if r.get("is_disposable_domain", False):
+                scores.append(85)
+            elif r.get("is_newly_registered", False):
+                scores.append(60)
+
+        elif source == "username_presence":
+            if r.get("platforms_found"):
+                scores.append(min(len(r.get("platforms_found")) * 10, 30))
+
+        elif source == "phone_osint":
+            if r.get("is_repeat_offender_number", False):
+                scores.append(95)
+            elif not r.get("is_valid_format", True):
+                scores.append(30)
+
+        elif source == "cross_case_linker":
+            if r.get("is_repeat_pattern", False):
+                scores.append(95)
+
     return max(scores) if scores else 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  UNIFIED OSINT CARD BUILDER
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_osint_card(case_id):
+    """
+    Build a unified OSINT card for the case and save it to the outputs directory.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # Load case number and metadata
+    cursor.execute("SELECT case_number, crime_name FROM cases WHERE id = ?", (case_id,))
+    case_row = cursor.fetchone()
+    if not case_row:
+        conn.close()
+        return None
+
+    case_number = case_row["case_number"]
+    crime_name = case_row["crime_name"]
+
+    # Load suspect entries
+    cursor.execute("SELECT * FROM suspects WHERE case_id = ?", (case_id,))
+    suspect_rows = cursor.fetchall()
+    conn.close()
+
+    entities = []
+    overall_scores = []
+    repeat_offender_flags = set()
+    recommended_next_steps = []
+
+    for row in suspect_rows:
+        try:
+            osint_data = json.loads(row["osint_data"])
+        except Exception:
+            osint_data = {}
+
+        threat_score = row["threat_score"]
+        overall_scores.append(threat_score)
+
+        entity = {
+            "identifier": row["identifier"],
+            "identifier_type": row["identifier_type"],
+            "osint_data": osint_data,
+            "threat_score": threat_score
+        }
+        entities.append(entity)
+
+        # Extract cross-case linkages
+        for r in osint_data.get("results", []):
+            if not r:
+                continue
+            source = r.get("source", "")
+            if source in ("phone_osint", "cross_case_linker"):
+                for lc in r.get("linked_cases", []):
+                    case_num = lc.get("case_number")
+                    if case_num:
+                        repeat_offender_flags.add(case_num)
+
+        # Generate recommended next steps
+        ident = row["identifier"]
+        itype = row["identifier_type"]
+
+        if itype == "phone":
+            phone_data = {}
+            for r in osint_data.get("results", []):
+                if r and r.get("source") == "phone_osint":
+                    phone_data = r
+                    break
+            
+            if phone_data.get("is_repeat_offender_number"):
+                linked_cases_str = ", ".join([lc["case_number"] for lc in phone_data.get("linked_cases", [])])
+                recommended_next_steps.append(
+                    f"Cross-reference suspect phone +91{ident} with linked cases: {linked_cases_str}"
+                )
+            
+            if phone_data.get("is_valid_format"):
+                recommended_next_steps.append(
+                    f"Request subscriber details and Call Detail Records (CDR) for +91{ident} from telecom service providers"
+                )
+            else:
+                recommended_next_steps.append(
+                    f"Flag phone number {ident} for verification (invalid Indian 10-digit mobile format)"
+                )
+
+        elif itype == "email":
+            hibp_data = {}
+            domain_data = {}
+            username_data = {}
+            for r in osint_data.get("results", []):
+                if not r:
+                    continue
+                src = r.get("source")
+                if src == "haveibeenpwned":
+                    hibp_data = r
+                elif src == "domain_age_check":
+                    domain_data = r
+                elif src == "username_presence":
+                    username_data = r
+
+            if domain_data.get("is_disposable_domain"):
+                recommended_next_steps.append(
+                    f"Submit legal notices to disposable mail provider ({domain_data.get('domain')}) to trace creator of {ident}"
+                )
+            elif domain_data.get("is_newly_registered"):
+                recommended_next_steps.append(
+                    f"Query WHOIS/RDAP and send hosting provider preservation request for newly registered domain {domain_data.get('domain')}"
+                )
+
+            if hibp_data.get("is_breached"):
+                breaches_str = ", ".join(hibp_data.get("breaches", [])[:3])
+                recommended_next_steps.append(
+                    f"Trace email {ident} breach footprint (leaked in: {breaches_str}); request account access logs from email provider"
+                )
+
+            if username_data.get("platforms_found"):
+                platforms_str = ", ".join(username_data.get("platforms_found"))
+                recommended_next_steps.append(
+                    f"Preserve profiles and issue Section 91 BNSS notice to platforms for username '{username_data.get('username')}': {platforms_str}"
+                )
+
+        elif itype == "upi_id":
+            upi_data = {}
+            for r in osint_data.get("results", []):
+                if r and r.get("source") == "cross_case_linker":
+                    upi_data = r
+                    break
+            
+            if upi_data.get("is_repeat_pattern"):
+                linked_cases_str = ", ".join([lc["case_number"] for lc in upi_data.get("linked_cases", [])])
+                recommended_next_steps.append(
+                    f"Cross-reference suspect UPI ID {ident} with linked cases: {linked_cases_str}"
+                )
+            
+            recommended_next_steps.append(
+                f"Issue Section 91 BNSS notice to the merchant/acquiring bank for UPI ID {ident} to freeze account, reverse funds, and retrieve KYC details"
+            )
+
+        elif itype == "wallet":
+            wallet_data = {}
+            for r in osint_data.get("results", []):
+                if r and r.get("source") == "cross_case_linker":
+                    wallet_data = r
+                    break
+            
+            if wallet_data.get("is_repeat_pattern"):
+                linked_cases_str = ", ".join([lc["case_number"] for lc in wallet_data.get("linked_cases", [])])
+                recommended_next_steps.append(
+                    f"Cross-reference suspect Crypto Wallet {ident} with linked cases: {linked_cases_str}"
+                )
+            
+            recommended_next_steps.append(
+                f"Track blockchain transactions for wallet {ident} using analytics and submit disclosure notices to cryptocurrency exchanges"
+            )
+
+        elif itype == "ip":
+            recommended_next_steps.append(
+                f"Request connection logs, port mapping, and subscriber details from the ISP for IP address {ident}"
+            )
+        
+        elif itype == "url":
+            recommended_next_steps.append(
+                f"Submit takedown request for phishing/malicious URL {ident} to the registrar and notify CERT-In"
+            )
+        
+        elif itype == "hash":
+            recommended_next_steps.append(
+                f"Perform digital forensic sweep on suspect endpoints to locate file matching MD5/SHA256 hash {ident}"
+            )
+
+    # Determine overall threat level
+    max_score = max(overall_scores) if overall_scores else 0
+    if max_score >= 50 or len(repeat_offender_flags) > 0:
+        overall_threat_level = "HIGH"
+    elif max_score >= 20:
+        overall_threat_level = "MEDIUM"
+    else:
+        overall_threat_level = "LOW"
+
+    # Deduplicate recommended next steps
+    seen_steps = set()
+    dedup_steps = []
+    for step in recommended_next_steps:
+        if step not in seen_steps:
+            seen_steps.add(step)
+            dedup_steps.append(step)
+
+    # If empty, add standard step
+    if not dedup_steps:
+        dedup_steps.append("No immediate threat indicators found; proceed with regular investigative steps.")
+
+    card = {
+        "case_number": case_number,
+        "crime_name": crime_name,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "entities": entities,
+        "overall_threat_level": overall_threat_level,
+        "overall_threat_score": max_score,
+        "repeat_offender_flags": list(repeat_offender_flags),
+        "recommended_next_steps": dedup_steps
+    }
+
+    # Ensure outputs directory exists
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
+    card_filename = f"osint_card_{case_number}.json"
+    card_path = os.path.join(OUTPUTS_DIR, card_filename)
+
+    with open(card_path, "w", encoding="utf-8") as f:
+        json.dump(card, f, indent=2, ensure_ascii=False)
+
+    return card_path
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -181,16 +419,15 @@ def print_ioc_header(idx, total, ioc_type, ioc_value):
 
 def print_vt_results(r):
     """Print VirusTotal results with color coding."""
-    if "error" in r:
+    if not r or r.get("error"):
         print(f"  {Fore.YELLOW}⚠️  VirusTotal lookup failed: "
-              f"{r['error']}{Style.RESET_ALL}")
+              f"{r.get('error') if r else 'No data'}{Style.RESET_ALL}")
         return
 
     malicious = r.get("malicious_count", 0)
     total = r.get("total_engines", 0)
     ioc_type = r.get("ioc_type", "")
 
-    # ── Verdict line ──────────────────────────────────────────────────────
     if malicious >= 5:
         print(f"  {Fore.RED}🔴 MALICIOUS — {malicious}/{total} engines "
               f"flagged{Style.RESET_ALL}")
@@ -201,7 +438,6 @@ def print_vt_results(r):
         print(f"  {Fore.GREEN}🟢 CLEAN — 0/{total} engines "
               f"flagged{Style.RESET_ALL}")
 
-    # ── Detail lines ──────────────────────────────────────────────────────
     print(f"  {Fore.WHITE}   Source     : VirusTotal")
     print(f"     Malicious : {malicious}  |  Suspicious: "
           f"{r.get('suspicious_count', 0)}  |  "
@@ -226,15 +462,14 @@ def print_vt_results(r):
 
 def print_abuseipdb_results(r):
     """Print AbuseIPDB results with color coding."""
-    if "error" in r:
+    if not r or r.get("error"):
         print(f"  {Fore.YELLOW}⚠️  AbuseIPDB lookup failed: "
-              f"{r['error']}{Style.RESET_ALL}")
+              f"{r.get('error') if r else 'No data'}{Style.RESET_ALL}")
         return
 
     abuse_score = r.get("abuse_score", 0)
     risk = r.get("risk_level", "LOW")
 
-    # ── Verdict line ──────────────────────────────────────────────────────
     if abuse_score >= 75:
         print(f"  {Fore.RED}🔴 HIGH RISK — Abuse confidence: "
               f"{abuse_score}%{Style.RESET_ALL}")
@@ -245,13 +480,11 @@ def print_abuseipdb_results(r):
         print(f"  {Fore.GREEN}🟢 LOW RISK — Abuse confidence: "
               f"{abuse_score}%{Style.RESET_ALL}")
 
-    # ── Special flags ─────────────────────────────────────────────────────
     if r.get("is_tor"):
         print(f"  {Fore.RED}⚠️  TOR EXIT NODE DETECTED{Style.RESET_ALL}")
     if r.get("is_vpn"):
         print(f"  {Fore.YELLOW}⚠️  VPN DETECTED{Style.RESET_ALL}")
 
-    # ── Detail lines ──────────────────────────────────────────────────────
     print(f"  {Fore.WHITE}   Source     : AbuseIPDB")
     print(f"     ISP       : {r.get('isp', 'N/A')}")
     print(f"     Usage     : {r.get('usage_type', 'N/A')}")
@@ -265,9 +498,9 @@ def print_abuseipdb_results(r):
 
 def print_ipinfo_results(r):
     """Print IPInfo geolocation results."""
-    if "error" in r:
+    if not r or r.get("error"):
         print(f"  {Fore.YELLOW}⚠️  IPInfo lookup failed: "
-              f"{r['error']}{Style.RESET_ALL}")
+              f"{r.get('error') if r else 'No data'}{Style.RESET_ALL}")
         return
 
     print(f"  {Fore.WHITE}   Source     : IPInfo (Geolocation)")
@@ -291,9 +524,9 @@ def print_ipinfo_results(r):
 
 def print_phishtank_results(r):
     """Print PhishTank results with color coding."""
-    if "error" in r:
+    if not r or r.get("error"):
         print(f"  {Fore.YELLOW}⚠️  PhishTank lookup failed: "
-              f"{r['error']}{Style.RESET_ALL}")
+              f"{r.get('error') if r else 'No data'}{Style.RESET_ALL}")
         return
 
     if r.get("is_phishing"):
@@ -313,9 +546,9 @@ def print_phishtank_results(r):
 
 def print_urlscan_results(r):
     """Print URLScan.io results."""
-    if "error" in r:
+    if not r or r.get("error"):
         print(f"  {Fore.YELLOW}⚠️  URLScan lookup failed: "
-              f"{r['error']}{Style.RESET_ALL}")
+              f"{r.get('error') if r else 'No data'}{Style.RESET_ALL}")
         return
 
     if r.get("note") == "scan_still_processing":
@@ -349,36 +582,130 @@ def print_urlscan_results(r):
           f"{Style.RESET_ALL}")
 
 
-def print_skip_message(ioc_type, ioc_value):
-    """Print a skip message for Day 3 IOC types."""
-    messages = {
-        "phone": f"⏭  Phone OSINT queued for Day 3 "
-                 f"(Truecaller + DOT FRI)",
-        "email": f"⏭  Email OSINT queued for Day 3 "
-                 f"(HIBP + Holehe + Sherlock)",
-        "upi_id": f"⏭  UPI OSINT queued for Day 3 "
-                  f"(NPCI trace)",
-        "wallet": f"⏭  Wallet tracing queued for Day 3 "
-                  f"(blockchain explorer)",
-    }
-    msg = messages.get(ioc_type, f"⏭  {ioc_type} queued for Day 3")
-    print(f"  {Fore.CYAN}{msg}{Style.RESET_ALL}")
+def print_hibp_results(r):
+    """Print HaveIBeenPwned breach results."""
+    if not r:
+        return
+    
+    err = r.get("error")
+
+    if err == "no_api_key":
+        print(f"  {Fore.YELLOW}⚠️  HIBP skipped — no API key{Style.RESET_ALL}")
+        return
+    elif err == "invalid_api_key":
+        print(f"  {Fore.YELLOW}⚠️  HIBP lookup failed — invalid API key{Style.RESET_ALL}")
+        return
+    elif err:
+        print(f"  {Fore.YELLOW}⚠️  HIBP lookup failed: {err}{Style.RESET_ALL}")
+        return
+
+    if r.get("is_breached"):
+        count = r.get("breach_count", 0)
+        print(f"  {Fore.RED}🔴 EMAIL FOUND IN {count} BREACHES{Style.RESET_ALL}")
+        breaches = ", ".join(r.get("breaches", [])[:5])
+        print(f"  {Fore.WHITE}   Source     : HaveIBeenPwned")
+        print(f"     Breaches   : {breaches}")
+    else:
+        print(f"  {Fore.GREEN}🟢 No known breaches{Style.RESET_ALL}")
+
+
+def print_domain_age_results(r):
+    """Print email domain analysis results."""
+    if not r:
+        return
+    
+    err = r.get("error")
+    if err:
+        print(f"  {Fore.YELLOW}⚠️  Email domain check failed: {err}{Style.RESET_ALL}")
+        return
+
+    print(f"  {Fore.WHITE}   Source     : Domain Age & Disposable Check")
+    domain = r.get("domain", "N/A")
+    print(f"     Domain     : {domain}")
+
+    if r.get("is_disposable_domain"):
+        print(f"  {Fore.RED}🔴 DISPOSABLE EMAIL DOMAIN DETECTED{Style.RESET_ALL}")
+    
+    if r.get("is_newly_registered"):
+        age = r.get("domain_age_days", "N/A")
+        print(f"  {Fore.RED}🔴 Domain registered {age} days ago{Style.RESET_ALL}")
+    elif r.get("domain_age_days") is not None:
+        print(f"     Domain Age : {r.get('domain_age_days')} days")
+
+    if r.get("domain_created_date"):
+        print(f"     Created At : {r.get('domain_created_date')}")
+    if r.get("registrar"):
+        print(f"     Registrar  : {r.get('registrar')}")
+
+
+def print_username_results(r):
+    """Print username presence check results."""
+    if not r:
+        return
+    
+    found = r.get("platforms_found", [])
+    if found:
+        platforms_str = ", ".join(found)
+        print(f"  {Fore.CYAN}🔍 Found on: {platforms_str}{Style.RESET_ALL}")
+    else:
+        print(f"  {Fore.GREEN}✓ No social profiles detected (checked major platforms){Style.RESET_ALL}")
+
+
+def print_phone_results(r):
+    """Print phone number OSINT results."""
+    if not r:
+        return
+    
+    phone = r.get("phone", "")
+    print(f"  {Fore.WHITE}   Source     : Phone OSINT")
+    
+    if r.get("is_valid_format"):
+        print(f"     Format     : Valid Indian Mobile")
+    else:
+        print(f"  {Fore.YELLOW}⚠️  Format     : Invalid Indian Mobile Format{Style.RESET_ALL}")
+
+    if r.get("is_repeat_offender_number"):
+        linked = r.get("linked_cases", [])
+        cases = ", ".join([c["case_number"] for c in linked])
+        print(f"  {Fore.RED}🚨 REPEAT OFFENDER PATTERN — linked to {len(linked)} other case(s): {cases}{Style.RESET_ALL}")
+    else:
+        print(f"  {Fore.GREEN}✓ No prior case linkage found{Style.RESET_ALL}")
+
+
+def print_upi_wallet_results(r):
+    """Print UPI ID or Crypto Wallet cross-case results."""
+    if not r:
+        return
+    
+    ioc_type = r.get("ioc_type", "upi_id")
+    label = "UPI ID" if ioc_type == "upi_id" else "Wallet Address"
+    print(f"  {Fore.WHITE}   Source     : Cross-case Linker ({label})")
+    
+    if r.get("note"):
+        print(f"     Note       : {r.get('note')}")
+
+    if r.get("is_repeat_pattern"):
+        linked = r.get("linked_cases", [])
+        cases = ", ".join([c["case_number"] for c in linked])
+        print(f"  {Fore.RED}🚨 REPEAT OFFENDER PATTERN — linked to {len(linked)} other case(s): {cases}{Style.RESET_ALL}")
+    else:
+        print(f"  {Fore.GREEN}✓ No prior case linkage found{Style.RESET_ALL}")
 
 
 def print_osint_results(osint_result):
     """
-    Route each sub-result to the correct display function
-    based on its source.
+    Route each sub-result to the correct display function based on its source.
     """
     results = osint_result.get("results", [])
 
     if osint_result.get("note") and not results:
-        # Day 3 skip or private IP
         return
 
     for r in results:
+        if not r:
+            continue
         source = r.get("source", "")
-        print()  # spacing
+        print()
 
         if source == "virustotal":
             print_vt_results(r)
@@ -390,17 +717,25 @@ def print_osint_results(osint_result):
             print_phishtank_results(r)
         elif source == "urlscan":
             print_urlscan_results(r)
+        elif source == "haveibeenpwned":
+            print_hibp_results(r)
+        elif source == "domain_age_check":
+            print_domain_age_results(r)
+        elif source == "username_presence":
+            print_username_results(r)
+        elif source == "phone_osint":
+            print_phone_results(r)
+        elif source == "cross_case_linker":
+            print_upi_wallet_results(r)
         else:
-            if "error" in r:
-                print(f"  {Fore.YELLOW}⚠️  {source} lookup failed: "
-                      f"{r['error']}{Style.RESET_ALL}")
+            if r and r.get("error"):
+                print(f"  {Fore.YELLOW}⚠️  {source} lookup failed: {r.get('error')}{Style.RESET_ALL}")
 
 
 def print_case_summary(case_number, total, malicious_count,
                        clean_count, skipped_count, threat_level,
                        overall_score):
     """Print the final case threat summary."""
-    # ── Colour for threat level ───────────────────────────────────────────
     if threat_level == "HIGH":
         level_color = Fore.RED
     elif threat_level == "MEDIUM":
@@ -408,7 +743,6 @@ def print_case_summary(case_number, total, malicious_count,
     else:
         level_color = Fore.GREEN
 
-    # ── Recommended action ────────────────────────────────────────────────
     if threat_level == "HIGH":
         action = ("Immediate investigation required. "
                   "Escalate to senior officer. "
@@ -419,8 +753,7 @@ def print_case_summary(case_number, total, malicious_count,
                   "Monitor suspect IOCs.")
     else:
         action = ("Low risk indicators. "
-                  "Continue with standard investigation protocol. "
-                  "Day 3 identity OSINT may reveal more.")
+                  "Continue with standard investigation protocol.")
 
     print(f"\n\n{Fore.WHITE}{'═' * 60}")
     print(f"  📊  CASE THREAT SUMMARY — {Fore.CYAN}{case_number}{Fore.WHITE}")
@@ -428,7 +761,7 @@ def print_case_summary(case_number, total, malicious_count,
     print(f"  Total IOCs analysed   : {Fore.CYAN}{total}{Fore.WHITE}")
     print(f"  Malicious flagged     : {Fore.RED}{malicious_count}{Fore.WHITE}")
     print(f"  Clean                 : {Fore.GREEN}{clean_count}{Fore.WHITE}")
-    print(f"  Skipped (Day 3)       : {Fore.YELLOW}{skipped_count}{Fore.WHITE}")
+    print(f"  Skipped (Private IPs) : {Fore.YELLOW}{skipped_count}{Fore.WHITE}")
     print(f"{'─' * 60}")
     print(f"  Overall Threat Score  : {level_color}{overall_score}/100{Fore.WHITE}")
     print(f"  Overall Threat Level  : {level_color}■ {threat_level}{Fore.WHITE}")
@@ -446,7 +779,6 @@ def main():
     """Main OSINT runner entry point."""
     print(OSINT_BANNER)
 
-    # ── Parse arguments ───────────────────────────────────────────────────
     if len(sys.argv) < 2:
         print(f"  {Fore.RED}✗ Usage: python osint_runner.py "
               f"<case_number>{Style.RESET_ALL}")
@@ -456,7 +788,6 @@ def main():
 
     case_number = sys.argv[1].strip()
 
-    # ── Load case ─────────────────────────────────────────────────────────
     print(f"  {Fore.WHITE}Loading case: {Fore.CYAN}{case_number}"
           f"{Style.RESET_ALL}...")
 
@@ -467,7 +798,6 @@ def main():
               f"first.{Style.RESET_ALL}\n")
         sys.exit(1)
 
-    # ── Load IOCs ─────────────────────────────────────────────────────────
     case_id = case["id"]
     iocs = load_iocs(case_id)
 
@@ -478,20 +808,8 @@ def main():
               f"IOCs.{Style.RESET_ALL}\n")
         sys.exit(0)
 
-    # ── Print case header ─────────────────────────────────────────────────
     print_case_header(case, len(iocs))
 
-    # ── Check if there are any IP/URL/domain/hash IOCs ────────────────────
-    osint_types = {"ip", "url", "domain", "hash"}
-    has_osint_iocs = any(ioc["ioc_type"] in osint_types for ioc in iocs)
-
-    if not has_osint_iocs:
-        print(f"  {Fore.CYAN}ℹ  No IP/URL/domain IOCs found. Day 3 will "
-              f"handle")
-        print(f"     phone/email/identity OSINT for this case."
-              f"{Style.RESET_ALL}\n")
-
-    # ── Process each IOC ──────────────────────────────────────────────────
     malicious_count = 0
     clean_count = 0
     skipped_count = 0
@@ -506,14 +824,8 @@ def main():
 
         print_ioc_header(idx, len(iocs), ioc_type, ioc_value)
 
-        # ── Skip Day 3 IOC types ─────────────────────────────────────────
-        if ioc_type in ("phone", "email", "upi_id", "wallet"):
-            print_skip_message(ioc_type, ioc_value)
-            skipped_count += 1
-            continue
-
         # ── Run OSINT ─────────────────────────────────────────────────────
-        osint_result = run_osint(ioc_type, ioc_value)
+        osint_result = run_osint(ioc_type, ioc_value, current_case_id=case_id)
 
         # ── Handle private IP skip ────────────────────────────────────────
         if osint_result.get("note") == "private_ip_skipped":
@@ -553,7 +865,25 @@ def main():
     # ── Calculate overall threat level ────────────────────────────────────
     overall_score = max(all_scores) if all_scores else 0
 
-    if malicious_count > 0 or overall_score >= 50:
+    # Retrieve case linkages to check repeat offenders
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM suspects WHERE case_id = ?", (case_id,))
+    suspect_rows = cursor.fetchall()
+    conn.close()
+    
+    repeat_linkages = False
+    for row in suspect_rows:
+        try:
+            data = json.loads(row[3]) # osint_data is index 3 (id, case_id, identifier, identifier_type, osint_data, threat_score, created_at)
+        except Exception:
+            data = {}
+        for r in data.get("results", []):
+            if r and r.get("source") in ("phone_osint", "cross_case_linker") and r.get("linked_cases"):
+                repeat_linkages = True
+                break
+
+    if malicious_count > 0 or overall_score >= 50 or repeat_linkages:
         threat_level = "HIGH"
     elif overall_score >= 20 or any(s >= 20 for s in all_scores):
         threat_level = "MEDIUM"
@@ -562,6 +892,11 @@ def main():
 
     # ── Update case threat score ──────────────────────────────────────────
     update_case_threat_score(case_number, overall_score)
+
+    # ── Build and Save OSINT Card ─────────────────────────────────────────
+    card_path = build_osint_card(case_id)
+    if card_path:
+        print(f"\n  {Fore.GREEN}📄 OSINT Card saved: {card_path}{Style.RESET_ALL}")
 
     # ── Print summary ─────────────────────────────────────────────────────
     total_processed = malicious_count + clean_count + skipped_count

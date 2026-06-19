@@ -1,0 +1,42 @@
+{
+  "case_number": "KL-CYB-2025-0001",
+  "crime_name": "Identity Theft / Impersonation",
+  "generated_at": "2026-06-19T13:53:46.620073Z",
+  "entities": [
+    {
+      "identifier": "9876543210",
+      "identifier_type": "phone",
+      "osint_data": {
+        "ioc_type": "phone",
+        "ioc_value": "9876543210",
+        "results": [
+          {
+            "source": "phone_osint",
+            "phone": "9876543210",
+            "is_valid_format": true,
+            "linked_cases": [
+              {
+                "case_number": "KL-CYB-2025-0002",
+                "crime_name": "Phishing",
+                "date_filed": "2026-06-19"
+              }
+            ],
+            "is_repeat_offender_number": true,
+            "error": null
+          }
+        ],
+        "is_malicious": true
+      },
+      "threat_score": 95
+    }
+  ],
+  "overall_threat_level": "HIGH",
+  "overall_threat_score": 95,
+  "repeat_offender_flags": [
+    "KL-CYB-2025-0002"
+  ],
+  "recommended_next_steps": [
+    "Cross-reference suspect phone +919876543210 with linked cases: KL-CYB-2025-0002",
+    "Request subscriber details and Call Detail Records (CDR) for +919876543210 from telecom service providers"
+  ]
+}

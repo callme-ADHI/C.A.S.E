@@ -1,0 +1,43 @@
+{
+  "case_number": "KL-CYB-2025-0003",
+  "crime_name": "Financial Fraud",
+  "generated_at": "2026-06-19T13:54:14.881215Z",
+  "entities": [
+    {
+      "identifier": "scammer@ybl",
+      "identifier_type": "upi_id",
+      "osint_data": {
+        "ioc_type": "upi_id",
+        "ioc_value": "scammer@ybl",
+        "results": [
+          {
+            "source": "cross_case_linker",
+            "ioc_type": "upi_id",
+            "value": "scammer@ybl",
+            "linked_cases": [
+              {
+                "case_number": "KL-CYB-2025-0002",
+                "crime_name": "Phishing",
+                "date_filed": "2026-06-19"
+              }
+            ],
+            "is_repeat_pattern": true,
+            "note": "Live NPCI trace requires LEA legal request — not available via public API",
+            "error": null
+          }
+        ],
+        "is_malicious": true
+      },
+      "threat_score": 95
+    }
+  ],
+  "overall_threat_level": "HIGH",
+  "overall_threat_score": 95,
+  "repeat_offender_flags": [
+    "KL-CYB-2025-0002"
+  ],
+  "recommended_next_steps": [
+    "Cross-reference suspect UPI ID scammer@ybl with linked cases: KL-CYB-2025-0002",
+    "Issue Section 91 BNSS notice to the merchant/acquiring bank for UPI ID scammer@ybl to freeze account, reverse funds, and retrieve KYC details"
+  ]
+}

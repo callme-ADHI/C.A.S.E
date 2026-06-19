@@ -1,13 +1,20 @@
 """
 C.A.S.E. — Cyber Attack Scene Examiner
-OSINT Engine — Day 2
+OSINT Engine — Day 2 + Day 3
 
 Unified OSINT module containing:
-  1. VirusTotal     — IP, URL, domain, hash lookups
-  2. AbuseIPDB      — IP abuse scoring
-  3. IPInfo         — IP geolocation + ASN
-  4. PhishTank      — URL phishing check (no key needed)
-  5. URLScan.io     — URL scanning + screenshot capture
+  Day 2:
+    1. VirusTotal     — IP, URL, domain, hash lookups
+    2. AbuseIPDB      — IP abuse scoring
+    3. IPInfo         — IP geolocation + ASN
+    4. PhishTank      — URL phishing check (no key needed)
+    5. URLScan.io     — URL scanning + screenshot capture
+  Day 3:
+    6. HaveIBeenPwned — Email breach check
+    7. Email Domain   — Domain age + disposable check
+    8. Username       — Platform presence check
+    9. Phone          — Format validation + cross-case linking
+   10. UPI/Wallet     — Cross-case pattern linking
 
 Orchestrator function run_osint() dispatches IOCs to the correct
 module(s) and returns structured, aggregated results.
@@ -16,12 +23,16 @@ module(s) and returns structured, aggregated results.
 import base64
 import ipaddress
 import json
+import re
+import sqlite3
 import time
+from datetime import datetime
 from urllib.parse import urlparse
 
 import requests
 
-from config.config import VT_KEY, ABUSEIPDB_KEY, IPINFO_KEY, URLSCAN_KEY
+from config.config import (VT_KEY, ABUSEIPDB_KEY, IPINFO_KEY,
+                           URLSCAN_KEY, HIBP_KEY, DB_PATH)
 
 # ── Timeout for all HTTP requests (seconds) ───────────────────────────────
 REQUEST_TIMEOUT = 10
@@ -583,18 +594,411 @@ def urlscan_lookup(url):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 6 — HaveIBeenPwned (Day 3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def hibp_lookup(email):
+    """
+    Query HaveIBeenPwned for email breach history.
+
+    Args:
+        email: Email address to check.
+
+    Returns:
+        dict with breach data or error information.
+    """
+    if not HIBP_KEY:
+        return {
+            "source": "haveibeenpwned",
+            "error": "no_api_key",
+            "email": email,
+            "is_breached": None,
+        }
+
+    endpoint = (f"https://haveibeenpwned.com/api/v3/"
+                f"breachedaccount/{email}")
+    headers = {
+        "hibp-api-key": HIBP_KEY,
+        "User-Agent": "CASE-Kerala-Cyber-Cell",
+    }
+    params = {"truncateResponse": "false"}
+
+    try:
+        resp = requests.get(
+            endpoint, headers=headers, params=params,
+            timeout=REQUEST_TIMEOUT)
+
+        # 404 means NOT breached — this is success, not error
+        if resp.status_code == 404:
+            return {
+                "source": "haveibeenpwned",
+                "email": email,
+                "breach_count": 0,
+                "breaches": [],
+                "breach_details": [],
+                "is_breached": False,
+                "error": None,
+            }
+
+        if resp.status_code == 401:
+            return {
+                "source": "haveibeenpwned",
+                "error": "invalid_api_key",
+                "email": email,
+                "is_breached": None,
+            }
+
+        if resp.status_code == 429:
+            return {
+                "source": "haveibeenpwned",
+                "error": "rate_limited",
+                "email": email,
+                "is_breached": None,
+            }
+
+        resp.raise_for_status()
+        data = resp.json()
+
+        breach_names = [b.get("Name", "") for b in data]
+        breach_details = [
+            {
+                "name": b.get("Name", ""),
+                "date": b.get("BreachDate", ""),
+                "data_classes": b.get("DataClasses", []),
+            }
+            for b in data
+        ]
+
+        return {
+            "source": "haveibeenpwned",
+            "email": email,
+            "breach_count": len(data),
+            "breaches": breach_names,
+            "breach_details": breach_details,
+            "is_breached": len(data) > 0,
+            "error": None,
+        }
+
+    except requests.exceptions.Timeout:
+        return _make_error_result("haveibeenpwned", email, "timeout")
+    except requests.exceptions.RequestException as e:
+        return _make_error_result("haveibeenpwned", email, str(e))
+    except Exception as e:
+        return _make_error_result("haveibeenpwned", email, str(e))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 7 — Email Domain Age / Disposable Check (Day 3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Known disposable email domains used in fraud
+DISPOSABLE_DOMAINS = [
+    "tempmail.com", "guerrillamail.com", "mailinator.com",
+    "10minutemail.com", "throwawaymail.com", "yopmail.com",
+    "trashmail.com", "getnada.com", "fakeinbox.com",
+    "guerrillamail.info", "grr.la", "sharklasers.com",
+    "guerrillamail.net", "tempail.com", "dispostable.com",
+]
+
+
+def analyze_email_domain(email):
+    """
+    Analyse the domain part of an email address for fraud signals.
+
+    Checks domain age via RDAP and flags disposable email providers.
+
+    Args:
+        email: Email address to analyse.
+
+    Returns:
+        dict with domain analysis data.
+    """
+    domain = ""
+    if "@" in email:
+        domain = email.split("@", 1)[1].lower().strip()
+
+    if not domain:
+        return {
+            "source": "domain_age_check",
+            "email": email,
+            "domain": "",
+            "error": "invalid_email_no_domain",
+        }
+
+    # Check disposable domain list
+    is_disposable = domain in DISPOSABLE_DOMAINS
+
+    # Query RDAP for domain registration date
+    domain_created = None
+    domain_age_days = None
+    is_newly_registered = False
+    registrar = None
+
+    try:
+        resp = requests.get(
+            f"https://rdap.org/domain/{domain}",
+            timeout=8)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            events = data.get("events", [])
+            for event in events:
+                if event.get("eventAction") == "registration":
+                    domain_created = event.get("eventDate", "")
+                    break
+
+            # Parse date and calculate age
+            if domain_created:
+                # Handle ISO format dates
+                date_str = domain_created.split("T")[0]
+                try:
+                    created_dt = datetime.strptime(
+                        date_str, "%Y-%m-%d")
+                    domain_age_days = (
+                        datetime.now() - created_dt).days
+                    is_newly_registered = domain_age_days < 30
+                except ValueError:
+                    pass
+
+            # Extract registrar
+            entities = data.get("entities", [])
+            for entity in entities:
+                roles = entity.get("roles", [])
+                if "registrar" in roles:
+                    vcard = entity.get("vcardArray", [])
+                    if len(vcard) > 1:
+                        for field in vcard[1]:
+                            if field[0] == "fn":
+                                registrar = field[3]
+                                break
+                    if not registrar:
+                        registrar = entity.get("handle", "")
+                    break
+
+    except Exception:
+        pass  # RDAP lookup is best-effort
+
+    return {
+        "source": "domain_age_check",
+        "email": email,
+        "domain": domain,
+        "domain_created_date": domain_created,
+        "domain_age_days": domain_age_days,
+        "is_newly_registered": is_newly_registered,
+        "is_disposable_domain": is_disposable,
+        "registrar": registrar,
+        "error": None,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 8 — Username Platform Presence Check (Day 3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+PLATFORMS_TO_CHECK = {
+    "Instagram": "https://www.instagram.com/{username}/",
+    "Twitter/X": "https://x.com/{username}",
+    "Telegram": "https://t.me/{username}",
+    "GitHub": "https://github.com/{username}",
+    "Facebook": "https://www.facebook.com/{username}",
+}
+
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/120.0.0.0 Safari/537.36")
+
+
+def username_presence_check(username):
+    """
+    Check if a username exists on major social platforms.
+
+    Best-effort heuristic check using HTTP status codes.
+
+    Args:
+        username: Username string to check.
+
+    Returns:
+        dict with presence indicators per platform.
+    """
+    results = {}
+    platforms_found = []
+    platforms_checked = list(PLATFORMS_TO_CHECK.keys())
+    headers = {"User-Agent": BROWSER_UA}
+
+    for platform, url_template in PLATFORMS_TO_CHECK.items():
+        url = url_template.format(username=username)
+        try:
+            resp = requests.get(
+                url, headers=headers, timeout=8,
+                allow_redirects=True)
+
+            if resp.status_code == 200:
+                results[platform] = "found"
+                platforms_found.append(platform)
+            elif resp.status_code == 404:
+                results[platform] = "not_found"
+            else:
+                results[platform] = "uncertain"
+
+        except Exception:
+            results[platform] = "uncertain"
+
+        time.sleep(1)  # avoid rate limiting
+
+    return {
+        "source": "username_presence",
+        "username": username,
+        "platforms_found": platforms_found,
+        "platforms_checked": platforms_checked,
+        "results": results,
+        "error": None,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 9 — Phone Number OSINT + Cross-Case Linking (Day 3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def phone_lookup(phone_number, current_case_id=None):
+    """
+    Validate Indian phone number format and check for cross-case
+    linkage in the local cases.db database.
+
+    Args:
+        phone_number:    Phone number string.
+        current_case_id: Integer ID of the current case (to exclude
+                         from cross-case results).
+
+    Returns:
+        dict with validation and cross-case linking data.
+    """
+    # Clean the number
+    cleaned = re.sub(r"[\s\-\(\)]", "", str(phone_number))
+    cleaned = re.sub(r"^(\+91|91|0)", "", cleaned)
+
+    # Validate format
+    is_valid = bool(re.fullmatch(r"[6-9]\d{9}", cleaned))
+
+    # Cross-case linking — the killer feature
+    linked_cases = []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        query = """
+            SELECT cases.case_number, cases.crime_name,
+                   cases.date_filed
+            FROM iocs
+            JOIN cases ON iocs.case_id = cases.id
+            WHERE iocs.ioc_type = 'phone'
+              AND iocs.ioc_value = ?
+        """
+        params = [cleaned]
+
+        if current_case_id is not None:
+            query += " AND iocs.case_id != ?"
+            params.append(current_case_id)
+
+        cursor.execute(query, params)
+        for row in cursor.fetchall():
+            linked_cases.append({
+                "case_number": row["case_number"],
+                "crime_name": row["crime_name"],
+                "date_filed": row["date_filed"],
+            })
+        conn.close()
+
+    except Exception as e:
+        print(f"  [DEBUG] Cross-case phone query error: {e}")
+
+    return {
+        "source": "phone_osint",
+        "phone": cleaned,
+        "is_valid_format": is_valid,
+        "linked_cases": linked_cases,
+        "is_repeat_offender_number": len(linked_cases) > 0,
+        "error": None,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MODULE 10 — UPI ID / Wallet Cross-Case Linking (Day 3)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def upi_wallet_lookup(value, ioc_type, current_case_id=None):
+    """
+    Check for cross-case pattern linking of UPI IDs or
+    crypto wallet addresses in the local cases.db.
+
+    Args:
+        value:           The UPI ID or wallet address string.
+        ioc_type:        "upi_id" or "wallet".
+        current_case_id: Integer ID of the current case.
+
+    Returns:
+        dict with cross-case linking data.
+    """
+    linked_cases = []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        query = """
+            SELECT cases.case_number, cases.crime_name,
+                   cases.date_filed
+            FROM iocs
+            JOIN cases ON iocs.case_id = cases.id
+            WHERE iocs.ioc_type = ?
+              AND iocs.ioc_value = ?
+        """
+        params = [ioc_type, value]
+
+        if current_case_id is not None:
+            query += " AND iocs.case_id != ?"
+            params.append(current_case_id)
+
+        cursor.execute(query, params)
+        for row in cursor.fetchall():
+            linked_cases.append({
+                "case_number": row["case_number"],
+                "crime_name": row["crime_name"],
+                "date_filed": row["date_filed"],
+            })
+        conn.close()
+
+    except Exception as e:
+        print(f"  [DEBUG] Cross-case {ioc_type} query error: {e}")
+
+    type_label = "NPCI" if ioc_type == "upi_id" else "blockchain"
+
+    return {
+        "source": "cross_case_linker",
+        "ioc_type": ioc_type,
+        "value": value,
+        "linked_cases": linked_cases,
+        "is_repeat_pattern": len(linked_cases) > 0,
+        "note": (f"Live {type_label} trace requires LEA legal "
+                 f"request \u2014 not available via public API"),
+        "error": None,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  ORCHESTRATOR — run_osint()
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_osint(ioc_type, ioc_value):
+def run_osint(ioc_type, ioc_value, current_case_id=None):
     """
     Main OSINT dispatcher. Routes an IOC to the correct module(s)
     and returns aggregated results.
 
     Args:
-        ioc_type:  One of "ip", "url", "domain", "hash",
-                   "phone", "email", "upi_id", "wallet".
-        ioc_value: The IOC value string.
+        ioc_type:       One of "ip", "url", "domain", "hash",
+                        "phone", "email", "upi_id", "wallet".
+        ioc_value:      The IOC value string.
+        current_case_id: Integer case ID for cross-case linking.
 
     Returns:
         dict with keys: ioc_type, ioc_value, results (list),
@@ -686,20 +1090,58 @@ def run_osint(ioc_type, ioc_value):
             "is_malicious": flagged,
         }
 
-    # ── Day 3 IOCs (phone, email, upi_id, wallet) ────────────────────────
-    if ioc_type in ("phone", "email", "upi_id", "wallet"):
-        day3_notes = {
-            "phone": "Phone OSINT queued for Day 3 (Truecaller + DOT FRI)",
-            "email": "Email OSINT queued for Day 3 (HIBP + Holehe + Sherlock)",
-            "upi_id": "UPI OSINT queued for Day 3 (NPCI trace)",
-            "wallet": "Wallet tracing queued for Day 3 (blockchain explorer)",
-        }
+    # ── Phone numbers (Day 3) ─────────────────────────────────────────────
+    if ioc_type == "phone":
+        result = phone_lookup(ioc_value, current_case_id)
         return {
-            "ioc_type": ioc_type,
+            "ioc_type": "phone",
             "ioc_value": ioc_value,
-            "results": [],
-            "is_malicious": False,
-            "note": day3_notes.get(ioc_type, "Handled in Day 3"),
+            "results": [result],
+            "is_malicious": result.get(
+                "is_repeat_offender_number", False),
+        }
+
+    # ── Email addresses (Day 3) ───────────────────────────────────────────
+    if ioc_type == "email":
+        results = []
+        results.append(hibp_lookup(ioc_value))
+        results.append(analyze_email_domain(ioc_value))
+        # Extract username from email for presence check
+        username = ioc_value.split("@")[0] if "@" in ioc_value else ""
+        if username and len(username) >= 3:
+            results.append(username_presence_check(username))
+        is_flag = any([
+            results[0].get("is_breached"),
+            results[1].get("is_disposable_domain"),
+            results[1].get("is_newly_registered"),
+        ])
+        return {
+            "ioc_type": "email",
+            "ioc_value": ioc_value,
+            "results": results,
+            "is_malicious": bool(is_flag),
+        }
+
+    # ── UPI IDs (Day 3) ───────────────────────────────────────────────────
+    if ioc_type == "upi_id":
+        result = upi_wallet_lookup(
+            ioc_value, "upi_id", current_case_id)
+        return {
+            "ioc_type": "upi_id",
+            "ioc_value": ioc_value,
+            "results": [result],
+            "is_malicious": result.get("is_repeat_pattern", False),
+        }
+
+    # ── Crypto wallets (Day 3) ────────────────────────────────────────────
+    if ioc_type == "wallet":
+        result = upi_wallet_lookup(
+            ioc_value, "wallet", current_case_id)
+        return {
+            "ioc_type": "wallet",
+            "ioc_value": ioc_value,
+            "results": [result],
+            "is_malicious": result.get("is_repeat_pattern", False),
         }
 
     # ── Unknown IOC type ──────────────────────────────────────────────────
