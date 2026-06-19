@@ -1,4 +1,4 @@
-#!/home/adhi/Documents/Code/projects/antigravity/VERTEX/CASE/venv/bin/python3
+#!/home/adhi/Documents/Code/projects/antigravity/CASE/venv/bin/python3
 import sys
 from dotenv.__main__ import cli
 if __name__ == '__main__':
