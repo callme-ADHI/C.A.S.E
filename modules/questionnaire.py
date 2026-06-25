@@ -338,10 +338,31 @@ CRIME_QUESTIONS = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _validate_phone(value):
-    """Validate 10-digit Indian phone number (with optional +91 / 0 prefix)."""
+    """
+    Validate 10-digit Indian phone number.
+
+    Accepts optional country/trunk prefixes, but ONLY strips them
+    when the total length confirms a prefix is actually present:
+      - "+91XXXXXXXXXX" (13 chars)  -> strip "+91"
+      - "91XXXXXXXXXX"  (12 digits) -> strip "91"
+      - "0XXXXXXXXXX"   (11 digits) -> strip leading "0"
+
+    A bare 10-digit number that happens to START with "91"
+    (e.g. 9123456789) must NOT have those two digits stripped —
+    that was the original bug.
+
+    Valid Indian mobile numbers start with 6, 7, 8, or 9.
+    """
     cleaned = re.sub(r"[\s\-\(\)]", "", value)
-    cleaned = re.sub(r"^(\+91|91|0)", "", cleaned)
-    if re.fullmatch(r"\d{10}", cleaned):
+
+    if cleaned.startswith("+91") and len(cleaned) == 13:
+        cleaned = cleaned[3:]
+    elif cleaned.startswith("91") and len(cleaned) == 12:
+        cleaned = cleaned[2:]
+    elif cleaned.startswith("0") and len(cleaned) == 11:
+        cleaned = cleaned[1:]
+
+    if re.fullmatch(r"[6-9]\d{9}", cleaned):
         return cleaned
     return None
 

@@ -28,3 +28,6 @@ OUTPUTS_DIR = str(PROJECT_ROOT / "outputs")
 APP_NAME = "C.A.S.E. — Cyber Attack Scene Examiner"
 VERSION = "1.0.0"
 JURISDICTION = "Kerala Police Cyber Cell"
+
+# ─── Local History Toggle (Day 4) ────────────────────────────────────────────
+SAVE_HISTORY = False
